@@ -5,6 +5,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.fft import fft
 import torch.optim as optim
 import config as cfg
 import utils as utils
@@ -32,7 +33,11 @@ class Net(nn.Module):
         elif cfg.data == 'UWB':
             self.fc = nn.Sequential(*utils.block('BN', 138 * 2, cfg.hid_dim)) 
             self.lstm_time = nn.LSTM(138,cfg.hid_dim//2)
-            self.lstm_freq = nn.LSTM(138,cfg.hid_dim//2)              
+            self.lstm_freq = nn.LSTM(138,cfg.hid_dim//2)
+        elif cfg.data == "OURS":
+            self.fc = nn.Sequential(*utils.block('BN', 256 * 2, cfg.hid_dim)) 
+            self.lstm_time = nn.LSTM(256,cfg.hid_dim//2)
+            self.lstm_freq = nn.LSTM(256,cfg.hid_dim//2)       
         elif cfg.data == 'FMCW':
             self.fc = nn.Sequential(*utils.block('BN', 253 * 2, cfg.hid_dim)) 
             self.lstm_time = nn.LSTM(253,cfg.hid_dim//2)
@@ -68,9 +73,9 @@ class Net(nn.Module):
         
         
         # Freq:  sample_size * 512 * 60
-        x_freq = torch.rfft(x.permute(0,2,1).reshape(-1,win_len),1,onesided=False) 
-        x_real_freq = x_freq[:,:,0].reshape(bs,dim,win_len).permute(0,2,1)
-        x_img_freq = x_freq[:,:,1].reshape(bs,dim,win_len).permute(0,2,1)
+        x_freq = fft(x.permute(0,2,1).reshape(-1,win_len))
+        x_real_freq = x_freq[:,:].real.float().reshape(bs,dim,win_len).permute(0,2,1)
+        x_img_freq = x_freq[:,:].imag.float().reshape(bs,dim,win_len).permute(0,2,1)
         x_absolute = torch.sqrt((x_real_freq**2) + (x_img_freq**2)) # sample_size * 512 * 60
         
         
@@ -80,6 +85,7 @@ class Net(nn.Module):
         
         # Cat + FC
         combined = torch.cat([x,x_absolute],-1) # sample_size * 512 * （60*2）
+        # print( 'combined' ,combined.dtype)
         combined = self.fc(combined) # sample_size * 512 * hid
         
    
@@ -116,6 +122,7 @@ class Net(nn.Module):
         torch.cuda.empty_cache()
         
         feat = self.fc3(torch.cat([x,x_absolute],-1)) + feat
+        
         # Classifier Outputs
         pred = self.classifier(feat)
         

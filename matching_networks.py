@@ -79,6 +79,7 @@ class MatchingNetwork(nn.Module):
             self.lstm = nn.LSTM(cfg.hid_dim, cfg.hid_dim ,32, bidirectional=True) 
         self.fc = nn.Linear(cfg.num_class,cfg.num_class)
         self.sim_net = nn.Linear(3,12)
+
     def forward(self, support_set_images, support_set_y_one_hot, target_image, target_y):
         """
         Main process of the network
@@ -134,12 +135,10 @@ class MatchingNetwork(nn.Module):
         combine = torch.cat([similarites_fuse.unsqueeze(-1), similarites_time.unsqueeze(-1), similarites_freq.unsqueeze(-1)],-1) # batch_size, class_num, 3
         similarites = self.sim_net(combine).sum(-1) 
         
-        
-        
-    
+
         # produce predictions for target probabilities
         preds = self.classify(similarites, support_set_y=support_set_y_one_hot)
-        
+        # print("preds shape", preds.shape)
         del support_set_y_one_hot        
         torch.cuda.empty_cache()        
         
