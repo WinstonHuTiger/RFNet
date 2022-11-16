@@ -14,6 +14,7 @@ from torch.autograd import Variable
 import config as cfg
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.nn.functional as F
+import torch.nn as nn
 from matching_networks import MatchingNetwork     
 
 class Builder:
@@ -26,13 +27,7 @@ class Builder:
         self.total_test_batches = cfg.total_test_batches       
         self.data = data
         self.total_iter = 0
-        self.net = MatchingNetwork(base_model,fce = cfg.fce , additional = cfg.additional_linear, use_cuda = self.use_cuda)        
-
-
-        if self.use_cuda:
-            cudnn.benchmark = True  # set True to speedup
-            torch.cuda.manual_seed_all(2017)    
-            self.net.cuda()             
+        self.net = MatchingNetwork(base_model,fce = cfg.fce , additional = cfg.additional_linear, use_cuda = self.use_cuda)
                 
         self.total_train_iter = 0
         self.optim = self._create_optimizer(self.net) 
@@ -44,7 +39,12 @@ class Builder:
         elif cfg.optim == "sgd":
             optimizer = torch.optim.SGD(model.parameters(), lr=cfg.lr, momentum=0.9, dampening=0.9)
         return optimizer
-
+    def _enabel_cuda(self):
+        if self.use_cuda:
+            cudnn.benchmark = True  # set True to speedup
+            torch.cuda.manual_seed_all(2017)    
+            self.net.cuda()
+        
     def _adjust_learning_rate(self, optimizer):
         """
         Update the learning rate after some epochs
@@ -52,7 +52,7 @@ class Builder:
         :return:
         """
         
-    def run_tuning_epoch(self,total_batches, data_type):
+    def run_tuning_epoch(self,total_batches, data_type, mode = "train"):
         """
         Run the training epoch
         :param total_train_batches: Number of batches to train on
@@ -60,7 +60,7 @@ class Builder:
         """
         total_c_loss = 0.0
         total_accuracy = 0.0
-        if data_type == 'train':
+        if mode == 'train':
             for n,p in self.net.named_parameters():
                 p.requires_grad = True    
         else:
@@ -69,7 +69,7 @@ class Builder:
                     p.requires_grad = False
                 else:
                     p.requires_grad = True             
-                
+        n_classes = -1
         with tqdm.tqdm(total= total_batches) as pbar:
             self.net.train()
             for i in range(total_batches):
@@ -79,15 +79,19 @@ class Builder:
                 # query_x: bs * 512 * 60 
                 if data_type =='train':
                     x_support_set, y_support_set, x_target, y_target = self.data.get_train_batch()
+                    n_classes = self.data.train_class
                 elif data_type == 'val':
-                    x_support_set, y_support_set, x_target, y_target = self.data.get_val_batch()                    
+                    x_support_set, y_support_set, x_target, y_target = self.data.get_val_batch()
+                    n_classes = self.data.test_class                    
                 elif data_type == 'test':
-                    x_support_set, y_support_set, x_target, y_target = self.data.get_test_batch()                     
+                    x_support_set, y_support_set, x_target, y_target = self.data.get_test_batch()
+                    n_classes = self.data.test_class              
 
                 
                 x_support_set = Variable(torch.from_numpy(x_support_set)).float()
                 y_support_set = Variable(torch.from_numpy(y_support_set), requires_grad=False).long()
                 x_target = Variable(torch.from_numpy(x_target)).float()
+            
                 y_target = Variable(torch.from_numpy(y_target), requires_grad=False).squeeze().long()
                 
                 y_support_value = y_support_set
@@ -96,14 +100,19 @@ class Builder:
                 y_support_set = y_support_set.unsqueeze(2)
                 sequence_length = y_support_set.size()[1]
                 batch_size = y_support_set.size()[0]
+                 # y_support_set_one_hot = Variable(
+                #     torch.zeros(batch_size, sequence_length, self.data.n_classes).scatter_(2,
+                #                                                                             y_support_set.data,
+                                                                                            #  1), requires_grad=False)
+
                 y_support_set_one_hot = Variable(
-                    torch.zeros(batch_size, sequence_length, self.data.n_classes).scatter_(2,
-                                                                                            y_support_set.data,
-                                                                                            1), requires_grad=False)
-                
-                import GPUtil
-                GPUtil.showUtilization()
-                if  self.use_cuda:
+                torch.zeros(batch_size, sequence_length, n_classes).scatter_(2,
+                                                                    y_support_set.data,
+                                                                    1), requires_grad=False)
+
+                # import GPUtil
+                # GPUtil.showUtilization()
+                if self.use_cuda:
                     if cfg.use_para:
                         preds, _  = self.net.module.g(x_support_set.view(-1,x_support_set.shape[2],x_support_set.shape[3]).cuda())
                     else:
@@ -149,7 +158,7 @@ class Builder:
         
         
         
-    def run_training_epoch(self, total_train_batches):
+    def run_training_epoch(self, total_train_batches, data_type = "train"):
         
 
         """
@@ -177,7 +186,13 @@ class Builder:
                 # query_y: bs
                 # query_x: bs * 512 * 60 
                 
-                x_support_set, y_support_set, x_target, y_target = self.data.get_train_batch()
+                if data_type =='train':
+                    x_support_set, y_support_set, x_target, y_target = self.data.get_train_batch()
+                    n_classes = self.data.train_class
+                elif data_type == 'val':
+                    x_support_set, y_support_set, x_target, y_target = self.data.get_val_batch()
+                    n_classes = self.data.test_class
+                           
                 x_support_set = Variable(torch.from_numpy(x_support_set)).float()
                 y_support_set = Variable(torch.from_numpy(y_support_set), requires_grad=False).long()
                 if cfg.reshape_to_scene:
@@ -195,9 +210,9 @@ class Builder:
                 sequence_length = y_support_set.size()[1]
                 batch_size = y_support_set.size()[0]
                 y_support_set_one_hot = Variable(
-                torch.zeros(batch_size, sequence_length, self.data.n_classes).scatter_(2,
-                                                                                        y_support_set.data,
-                                                                                        1), requires_grad=False)
+                torch.zeros(batch_size, sequence_length, n_classes).scatter_(2,
+                                                                            y_support_set.data,
+                                                                            1), requires_grad=False)
 
                 if  self.use_cuda:
                     acc, c_loss = self.net(x_support_set.cuda(), y_support_set_one_hot.cuda(), x_target.cuda(), y_target.cuda())
@@ -265,9 +280,14 @@ class Builder:
                     sequence_length = y_support_set.size()[1]
                     batch_size = y_support_set.size()[0]
                     y_support_set_one_hot = Variable(
-                    torch.zeros(batch_size, sequence_length, self.data.n_classes).scatter_(2,
-                                                                                            y_support_set.data,
-                                                                                            1), requires_grad=False)
+                    torch.zeros(batch_size, sequence_length, self.data.test_class).scatter_(2,
+                                                                            y_support_set.data,
+                                                                            1), requires_grad=False)
+
+                    # y_support_set_one_hot = Variable(
+                    # torch.zeros(batch_size, sequence_length, self.data.n_classes).scatter_(2,
+                    #                                                                         y_support_set.data,
+                    #                                                                         1), requires_grad=False)
 
                     if  self.use_cuda:
                         acc, c_loss = self.net(x_support_set.cuda(), y_support_set_one_hot.cuda(), x_target.cuda(),
@@ -297,12 +317,12 @@ class Builder:
         """
         total_c_loss = 0.0
         total_accuracy = 0.0
+        std_list = []
 
         with tqdm.tqdm(total= total_test_batches) as pbar:
             with torch.no_grad():
                 self.net.eval()
                 for i in range(total_test_batches):
-
 
                     x_support_set, y_support_set, x_target, y_target = self.data.get_test_batch()
                     x_support_set = Variable(torch.from_numpy(x_support_set)).float()
@@ -322,9 +342,13 @@ class Builder:
                     sequence_length = y_support_set.size()[1]
                     batch_size = y_support_set.size()[0]
                     y_support_set_one_hot = Variable(
-                    torch.zeros(batch_size, sequence_length, self.data.n_classes).scatter_(2,
-                                                                                            y_support_set.data,
-                                                                                            1), requires_grad=False)
+                        torch.zeros(batch_size, sequence_length, self.data.test_class).scatter_(2,
+                                                                        y_support_set.data,
+                                                                        1), requires_grad=False)
+                    # y_support_set_one_hot = Variable(
+                    # torch.zeros(batch_size, sequence_length, self.data.n_classes).scatter_(2,
+                    #                                                                         y_support_set.data,
+                    #                                                                         1), requires_grad=False)
 
                     if  self.use_cuda:
                         acc, c_loss = self.net(x_support_set.cuda(), y_support_set_one_hot.cuda(), x_target.cuda(),
@@ -340,9 +364,37 @@ class Builder:
                     pbar.update(1)
                     total_c_loss += c_loss.item()
                     total_accuracy += acc.item()
-
+                    std_list.append(acc.item())
+                std = np.std(std_list)
                 total_c_loss = total_c_loss / total_test_batches
                 total_accuracy = total_accuracy / total_test_batches
-            return total_c_loss, total_accuracy           
+            
+            return total_c_loss, total_accuracy,std     
+    def save_model(self, path = "model.pth"):
+        torch.save(self.net.state_dict(), path)
+        print("model saved")
+
+    def load_model(self, path = "model.pth"):
+        self.net.load_state_dict(torch.load(path))
+    
+        self.net.fc = nn.Linear(cfg.num_new_class, cfg.num_new_class)
+        self.net.g.classifier = nn.Linear(512, cfg.num_new_class)
         
+        # self.net.load_state_dict(torch.load(path))
+    
+        print("loading net finished with new num classes")
         
+    def load_model_for_testing(self, path = "model.pth"):
+        self.net.load_state_dict(torch.load(path))
+
+        print("loading net finished")
+        # if self.use_cuda:
+        #     cudnn.benchmark = True  # set True to speedup
+        #     torch.cuda.manual_seed_all(2017)    
+        #     self.net.cuda() 
+        # except:
+        #     self.net.load_state_dict(torch.load(path), strict = False)
+        #     self.net.fc = nn.Linear(cfg.num_new_class, cfg.num_new_class)
+        #     self.net.g.classifier = nn.Linear(512, cfg.num_new_class)
+        #     print("loading net finishes with new num classes")
+            
